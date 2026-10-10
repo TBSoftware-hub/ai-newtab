@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, type HomepageModel } from "@homepage/agent-core";
+import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, DEFAULT_OPENROUTER_MODEL, OPENROUTER_CHECKPOINT_KEY, type HomepageModel } from "@homepage/agent-core";
 import { DEFAULT_REBUILD_INTERVAL_HOURS } from "@/lib/auto-rebuild";
 import { BUILD_STEPS } from "@/lib/protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveSetting } from "@/lib/storage";
+import { KEYS, activeApiKey, extensionStore, loadHomepage, loadSettings, saveConnection, saveSetting, type ConnectionSettings } from "@/lib/storage";
 import { toRenderable } from "@/lib/transpile";
 import { ApiKeySetup } from "./components/ApiKeySetup";
 import { BuildProgress } from "./components/BuildProgress";
@@ -13,7 +13,9 @@ import { useHomepageBuild } from "./useHomepageBuild";
 
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [connection, setConnection] = useState<ConnectionSettings>({
+    provider: "anthropic", apiKey: null, openrouterApiKey: null, openrouterModel: DEFAULT_OPENROUTER_MODEL,
+  });
   const [systemPrompt, setSystemPrompt] = useState("");
   const [blockedSites, setBlockedSites] = useState<string[]>(DEFAULT_BLOCKED_SITES);
   const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
@@ -41,18 +43,19 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [settings, homepage, activeSession] = await Promise.all([
+        const [settings, homepage, activeSession, checkpoint] = await Promise.all([
           loadSettings(),
           loadHomepage(),
           extensionStore.get<string>(KEYS.activeSessionId),
+          extensionStore.get(OPENROUTER_CHECKPOINT_KEY),
         ]);
-        setApiKey(settings.apiKey);
+        setConnection(settings);
         setSystemPrompt(settings.systemPrompt);
         setBlockedSites(settings.blockedSites);
         setModel(settings.model);
         setAutoRebuild(settings.autoRebuild);
         setIntervalHours(settings.rebuildIntervalHours ?? DEFAULT_REBUILD_INTERVAL_HOURS);
-        setResumable(activeSession ?? null);
+        setResumable(activeSession ?? (checkpoint ? "openrouter" : null));
         if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
       } finally {
         setLoading(false);
@@ -60,9 +63,9 @@ export default function App() {
     })();
   }, []);
 
-  const saveKey = useCallback(async (key: string) => {
-    await saveSetting("apiKey", key);
-    setApiKey(key);
+  const saveKey = useCallback(async (next: ConnectionSettings) => {
+    await saveConnection(next);
+    setConnection(await loadSettings());
   }, []);
 
   const savePrompt = useCallback(
@@ -92,7 +95,7 @@ export default function App() {
   }, []);
 
   if (loading) return <div style={{ padding: 20, textAlign: "center" }}>Loading…</div>;
-  if (!apiKey) return <ApiKeySetup onSave={saveKey} />;
+  if (!activeApiKey(connection)) return <ApiKeySetup initial={connection} onSave={saveKey} />;
 
   // With no homepage to fall back to, a running build takes over the tab.
   if (state.running && (!renderedCode || viewProgress)) {
@@ -117,6 +120,7 @@ export default function App() {
           <div style={{ ...errorBox, margin: "16px 0", padding: 12, borderRadius: 4 }}>{state.error}</div>
         )}
         <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+          <button style={{ ...btn, backgroundColor: "#555" }} onClick={() => setShowSettings(true)}>Settings</button>
           <button style={btn} onClick={() => build()}>
             Build today&apos;s homepage
           </button>
@@ -126,6 +130,10 @@ export default function App() {
             </button>
           )}
         </div>
+        {showSettings && <SettingsModal initialPrompt={systemPrompt} blockedSites={blockedSites}
+          model={model} onChangeModel={changeModel} autoRebuild={autoRebuild} onToggleAutoRebuild={toggleAutoRebuild}
+          intervalHours={intervalHours} onChangeInterval={changeInterval} onClose={() => setShowSettings(false)}
+          onSave={savePrompt} connection={connection} onSaveConnection={saveKey} />}
       </div>
     );
   }
@@ -207,6 +215,8 @@ export default function App() {
 
       {showSettings && (
         <SettingsModal
+          connection={connection}
+          onSaveConnection={saveKey}
           initialPrompt={systemPrompt}
           blockedSites={blockedSites}
           model={model}

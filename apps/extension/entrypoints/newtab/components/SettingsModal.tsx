@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MODEL_CHOICES, normalizeBlockList, type HomepageModel } from "@homepage/agent-core";
 import { REBUILD_INTERVAL_CHOICES } from "@/lib/auto-rebuild";
 import { btn } from "./ui";
+import { ApiKeySetup } from "./ApiKeySetup";
+import type { ConnectionSettings } from "@/lib/storage";
 
 export function SettingsModal({
   initialPrompt,
@@ -14,7 +16,11 @@ export function SettingsModal({
   onChangeInterval,
   onClose,
   onSave,
+  connection,
+  onSaveConnection,
 }: {
+  connection: ConnectionSettings;
+  onSaveConnection: (next: ConnectionSettings) => Promise<void>;
   initialPrompt: string;
   blockedSites: string[];
   model: HomepageModel;
@@ -28,6 +34,12 @@ export function SettingsModal({
 }) {
   const [draft, setDraft] = useState(initialPrompt);
   const [blockedDraft, setBlockedDraft] = useState(blockedSites.join("\n"));
+  const dialog = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement;
+    dialog.current?.querySelector<HTMLSelectElement>("select")?.focus();
+    return () => { if (previous instanceof HTMLElement) previous.focus(); };
+  }, []);
 
   return (
     <div
@@ -42,8 +54,21 @@ export function SettingsModal({
       }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div style={{ backgroundColor: "white", borderRadius: 8, padding: 24, width: "90%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
-        <h2 style={{ marginTop: 0, color: "#333" }}>Customize your homepage</h2>
+      <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="settings-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); onClose(); }
+          if (event.key !== "Tab") return;
+          const controls = [...event.currentTarget.querySelectorAll<HTMLElement>("button, input, select, textarea")]
+            .filter((control) => !control.matches(":disabled") && control.getClientRects().length);
+          const target = event.shiftKey ? controls.at(-1) : controls[0];
+          if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) {
+            event.preventDefault();
+            target?.focus();
+          }
+        }}
+        style={{ backgroundColor: "white", boxSizing: "border-box", borderRadius: 8, padding: 24, width: "90%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
+        <h2 id="settings-title" style={{ marginTop: 0, color: "#333" }}>Customize your homepage</h2>
+        <ApiKeySetup initial={connection} onSave={onSaveConnection} compact />
         <p style={{ color: "#666" }}>Standing instructions applied to every build.</p>
         <textarea
           value={draft}
@@ -51,6 +76,7 @@ export function SettingsModal({
           placeholder="e.g. 'Focus on tech news and Rust releases', 'Always surface unread GitHub PRs first'"
           style={{
             width: "100%",
+            boxSizing: "border-box",
             minHeight: 200,
             padding: 12,
             fontSize: 14,
@@ -71,10 +97,10 @@ export function SettingsModal({
         <p id="blocked-sites-help" style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
           One per line. Subdomains are included. Use *.example.com for wildcards.
         </p>
-        <label
+        {connection.provider === "anthropic" && <label
           style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}
         >
-          Model
+          Anthropic model
           <select
             value={model}
             onChange={(e) => onChangeModel(e.target.value as HomepageModel)}
@@ -86,7 +112,7 @@ export function SettingsModal({
               </option>
             ))}
           </select>
-        </label>
+        </label>}
         <label
           style={{
             display: "flex",
@@ -132,7 +158,7 @@ export function SettingsModal({
         </label>
         <p style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
           When on, the extension rebuilds in the background once your homepage is this old, so
-          your next tab shows a fresh one (uses your API key).
+          your next tab shows a fresh one (billed to your selected provider).
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 20, justifyContent: "flex-end" }}>
           <button

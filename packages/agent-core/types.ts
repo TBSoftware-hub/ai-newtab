@@ -111,7 +111,8 @@ export interface RunCallbacks {
 
 export interface HomepageBuildResult {
   code: string;
+  /** Remote Anthropic session ID, or local OpenRouter build ID. */
   sessionId: string;
   /** Where the code came from: a session output file, or a fenced block in the final message. */
-  source: "session-output" | "message-fence";
+  source: "session-output" | "message-fence" | "tool-submission";
 }
