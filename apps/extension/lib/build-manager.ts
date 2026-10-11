@@ -143,34 +143,35 @@ export class BuildManager {
       return; // single-flight: a second start just attaches.
     }
 
-    const settings = await loadSettings();
-    const { systemPrompt, model } = settings;
-    const [anthropicSession, openrouterCheckpoint] = await Promise.all([
-      extensionStore.get<string>(KEYS.activeSessionId),
-      extensionStore.get<OpenRouterCheckpoint>(OPENROUTER_CHECKPOINT_KEY),
-    ]);
-    const provider = opts.resume
-      ? openrouterCheckpoint ? "openrouter" : anthropicSession ? "anthropic" : settings.provider
-      : settings.provider;
-    const apiKey = activeApiKey({ ...settings, provider });
-    if (!apiKey) {
-      // Manual builds are gated behind the key-setup screen and auto-builds
-      // require a key, so this only happens if the key was removed.
-      console.warn("[BuildManager] startBuild aborted — no API key in storage");
-      const message = `No ${provider === "openrouter" ? "OpenRouter" : "Anthropic"} API key found. Add your key and try again.`;
-      this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
-      this.broadcast({ kind: "error", message });
-      return;
-    }
-
+    const controller = new AbortController();
     this.running = true;
-    this.controller = new AbortController();
-    this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
-    this.broadcast({ kind: "snapshot", state: this.state });
-    this.startKeepalive();
-    console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
-
     try {
+      this.controller = controller;
+      this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
+      this.broadcast({ kind: "snapshot", state: this.state });
+      this.startKeepalive();
+      console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
+
+      const settings = await loadSettings();
+      const { systemPrompt, model } = settings;
+      const [anthropicSession, openrouterCheckpoint] = await Promise.all([
+        extensionStore.get<string>(KEYS.activeSessionId),
+        extensionStore.get<OpenRouterCheckpoint>(OPENROUTER_CHECKPOINT_KEY),
+      ]);
+      const provider = opts.resume
+        ? openrouterCheckpoint ? "openrouter" : anthropicSession ? "anthropic" : settings.provider
+        : settings.provider;
+      const apiKey = activeApiKey({ ...settings, provider });
+      if (!apiKey) {
+        // Manual builds are gated behind the key-setup screen and auto-builds
+        // require a key, so this only happens if the key was removed.
+        console.warn("[BuildManager] startBuild aborted — no API key in storage");
+        const message = `No ${provider === "openrouter" ? "OpenRouter" : "Anthropic"} API key found. Add your key and try again.`;
+        this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
+        this.broadcast({ kind: "error", message });
+        return;
+      }
+
       // The key is the user's own, read from local storage — there is no server
       // to hide it behind. See ARCHITECTURE.md → Privacy.
       const common = {
@@ -178,7 +179,7 @@ export class BuildManager {
         store: extensionStore,
         userSystemPrompt: systemPrompt,
         blockedSites: async () => (await loadSettings()).blockedSites,
-        signal: this.controller.signal,
+        signal: controller.signal,
         callbacks: {
           onPhase: (phase: RunPhase, detail?: string) => this.onPhase(phase, detail),
           onText: (chunk: string) => this.onText(chunk),

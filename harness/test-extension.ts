@@ -185,16 +185,17 @@ try {
   await page.send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
 
   // Open a build port, send one message, and collect replies for a moment.
-  const talk = (msg: object, waitMs: number) =>
+  const talkMany = (messages: object[], waitMs: number) =>
     page.evaluate<string>(`
       new Promise((resolve) => {
         const port = chrome.runtime.connect({ name: "homepage-agent" });
         const replies = [];
         port.onMessage.addListener((m) => replies.push(m));
-        port.postMessage(${JSON.stringify(msg)});
+        for (const message of ${JSON.stringify(messages)}) port.postMessage(message);
         setTimeout(() => { port.disconnect(); resolve(JSON.stringify(replies)); }, ${waitMs});
       })
     `).then((raw) => JSON.parse(raw) as any[]);
+  const talk = (msg: object, waitMs: number) => talkMany([msg], waitMs);
 
   // ---- 3. subscribe → snapshot ---------------------------------------------
   const subscribed = await talk({ kind: "subscribe" }, 1500);
@@ -293,9 +294,9 @@ try {
   await sleep(500);
   const connection = await page.evaluate<Record<string, unknown>>("chrome.storage.local.get(['provider', 'openrouterModel'])");
   check("OpenRouter onboarding saves provider and custom model", connection.provider === "openrouter" && connection.openrouterModel === "test/model");
-  const built = await talk({ kind: "startBuild" }, 3000);
-  const done = built.find((m) => m.kind === "done");
-  check("worker completes mocked OpenRouter build", Boolean(done), built.find((m) => m.kind === "error")?.message);
+  const built = await talkMany([{ kind: "startBuild" }, { kind: "startBuild" }], 3000);
+  const done = built.filter((m) => m.kind === "done");
+  check("concurrent startBuild requests share one OpenRouter build", done.length === 1 && !built.some((m) => m.kind === "error"), built.find((m) => m.kind === "error")?.message);
   const saved = await page.evaluate<Record<string, any>>("chrome.storage.local.get(['homepageData', 'openrouterBuild'])");
   check("homepage persists and temporary checkpoint is cleared", /Fixture homepage/.test(saved.homepageData?.code ?? "") && saved.openrouterBuild === undefined);
   await page.evaluate(`Array.from(document.querySelectorAll("button")).find(b => b.title === "Settings" || b.textContent.includes("Settings")).click()`);
