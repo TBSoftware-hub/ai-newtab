@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { runHomepageBuild, type RunPhase } from "@homepage/agent-core";
+import { OPENROUTER_CHECKPOINT_KEY, runHomepageBuild, runOpenRouterBuild, type OpenRouterCheckpoint, type RunPhase } from "@homepage/agent-core";
 import { rebuildIntervalMs, shouldAutoRebuild } from "./auto-rebuild";
 import { browserBridge } from "./browser-bridge";
 import {
@@ -10,7 +10,8 @@ import {
   type BuildState,
   type PageMsg,
 } from "./protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveHomepage } from "./storage";
+import { KEYS, activeApiKey, extensionStore, loadHomepage, loadSettings, saveHomepage } from "./storage";
+import { validateHomepageCode } from "./transpile";
 
 type Port = Parameters<Parameters<typeof browser.runtime.onConnect.addListener>[0]>[0];
 
@@ -96,7 +97,8 @@ export class BuildManager {
     }
 
     const sessionId = await extensionStore.get<string>(KEYS.activeSessionId);
-    if (sessionId) {
+    const checkpoint = await extensionStore.get<OpenRouterCheckpoint>(OPENROUTER_CHECKPOINT_KEY);
+    if (sessionId || checkpoint) {
       void this.startBuild({ resume: true });
       return;
     }
@@ -116,7 +118,7 @@ export class BuildManager {
     if (
       !shouldAutoRebuild({
         enabled: settings.autoRebuild,
-        hasApiKey: Boolean(settings.apiKey),
+        hasApiKey: Boolean(activeApiKey(settings)),
         isRunning: this.running,
         lastBuildTimestamp: homepage?.timestamp,
         lastAutoAttemptTimestamp: lastAttempt,
@@ -141,51 +143,62 @@ export class BuildManager {
       return; // single-flight: a second start just attaches.
     }
 
-    const { apiKey, systemPrompt, model } = await loadSettings();
-    if (!apiKey) {
-      // Manual builds are gated behind the key-setup screen and auto-builds
-      // require a key, so this only happens if the key was removed.
-      console.warn("[BuildManager] startBuild aborted — no API key in storage");
-      const message = "No Anthropic API key found. Add your key and try again.";
-      this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
-      this.broadcast({ kind: "error", message });
-      return;
-    }
-
+    const controller = new AbortController();
     this.running = true;
-    this.controller = new AbortController();
-    this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
-    this.broadcast({ kind: "snapshot", state: this.state });
-    this.startKeepalive();
-    console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
-
     try {
+      this.controller = controller;
+      this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
+      this.broadcast({ kind: "snapshot", state: this.state });
+      this.startKeepalive();
+      console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
+
+      const settings = await loadSettings();
+      const { systemPrompt, model } = settings;
+      const [anthropicSession, openrouterCheckpoint] = await Promise.all([
+        extensionStore.get<string>(KEYS.activeSessionId),
+        extensionStore.get<OpenRouterCheckpoint>(OPENROUTER_CHECKPOINT_KEY),
+      ]);
+      const provider = opts.resume
+        ? openrouterCheckpoint ? "openrouter" : anthropicSession ? "anthropic" : settings.provider
+        : settings.provider;
+      const apiKey = activeApiKey({ ...settings, provider });
+      if (!apiKey) {
+        // Manual builds are gated behind the key-setup screen and auto-builds
+        // require a key, so this only happens if the key was removed.
+        console.warn("[BuildManager] startBuild aborted — no API key in storage");
+        const message = `No ${provider === "openrouter" ? "OpenRouter" : "Anthropic"} API key found. Add your key and try again.`;
+        this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
+        this.broadcast({ kind: "error", message });
+        return;
+      }
+
       // The key is the user's own, read from local storage — there is no server
       // to hide it behind. See ARCHITECTURE.md → Privacy.
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-
-      const resumeSessionId = opts.resume
-        ? await extensionStore.get<string>(KEYS.activeSessionId)
-        : undefined;
-
-      const result = await runHomepageBuild({
-        client,
+      const common = {
         bridge: browserBridge,
         store: extensionStore,
         userSystemPrompt: systemPrompt,
         blockedSites: async () => (await loadSettings()).blockedSites,
-        model,
-        resumeSessionId,
-        signal: this.controller.signal,
+        signal: controller.signal,
         callbacks: {
-          onPhase: (phase, detail) => this.onPhase(phase, detail),
-          onText: (chunk) => this.onText(chunk),
-          onLog: (line) => this.onLog(line),
+          onPhase: (phase: RunPhase, detail?: string) => this.onPhase(phase, detail),
+          onText: (chunk: string) => this.onText(chunk),
+          onLog: (line: string) => this.onLog(line),
         },
-      });
+      };
+      const result = provider === "openrouter"
+        ? await runOpenRouterBuild({
+          ...common, apiKey, model: settings.openrouterModel, resume: opts.resume,
+          validateCode: validateHomepageCode,
+        })
+        : await runHomepageBuild({
+          ...common, client: new Anthropic({ apiKey, dangerouslyAllowBrowser: true }),
+          model, resumeSessionId: opts.resume ? anthropicSession : undefined,
+        });
 
       // Persist the raw TSX; the page transpiles it for preview.
       await saveHomepage(result.code);
+      if (provider === "openrouter") await extensionStore.remove(OPENROUTER_CHECKPOINT_KEY);
 
       this.state = { ...this.state, running: false, phase: "done" };
       this.broadcast({ kind: "done", code: result.code });

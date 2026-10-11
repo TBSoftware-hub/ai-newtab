@@ -7,12 +7,14 @@
  * browser in production.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BrowserBridge, KVStore, RawSiteMetadata } from "@homepage/agent-core";
 
 /** Harness state (cached agent/environment IDs, active session) and output, next to these scripts. */
-export const STATE_PATH = join(import.meta.dir, ".agent-state.json");
-export const OUT_DIR = join(import.meta.dir, "out");
+const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
+export const STATE_PATH = join(HARNESS_DIR, ".agent-state.json");
+export const OUT_DIR = join(HARNESS_DIR, "out");
 export const OUT_PATH = join(OUT_DIR, "homepage.tsx");
 
 export class FileKVStore implements KVStore {

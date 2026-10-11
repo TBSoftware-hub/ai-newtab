@@ -5,6 +5,8 @@ import {
   STORAGE_KEYS as AGENT_KEYS,
   type HomepageModel,
   type KVStore,
+  DEFAULT_OPENROUTER_MODEL,
+  type HomepageProvider,
 } from "@homepage/agent-core";
 
 /**
@@ -19,6 +21,9 @@ export const KEYS = {
   systemPrompt: "systemPrompt",
   blockedSites: "blockedSites",
   model: "model",
+  provider: "provider",
+  openrouterApiKey: "openrouterApiKey",
+  openrouterModel: "openrouterModel",
   autoRebuild: "autoRebuild",
   /** ISO timestamp of the last auto-build *attempted* (success or not). */
   lastAutoBuildAttempt: "lastAutoBuildAttempt",
@@ -36,6 +41,9 @@ export interface Homepage {
 
 export interface Settings {
   apiKey: string | null;
+  provider: HomepageProvider;
+  openrouterApiKey: string | null;
+  openrouterModel: string;
   systemPrompt: string;
   blockedSites: string[];
   model: HomepageModel;
@@ -64,12 +72,18 @@ export async function loadSettings(): Promise<Settings> {
     KEYS.systemPrompt,
     KEYS.blockedSites,
     KEYS.model,
+    KEYS.provider,
+    KEYS.openrouterApiKey,
+    KEYS.openrouterModel,
     KEYS.autoRebuild,
     KEYS.rebuildIntervalHours,
   ]);
   const model = s[KEYS.model] as string | undefined;
   return {
     apiKey: (s[KEYS.apiKey] as string | undefined) ?? null,
+    provider: s[KEYS.provider] === "openrouter" ? "openrouter" : "anthropic",
+    openrouterApiKey: (s[KEYS.openrouterApiKey] as string | undefined) ?? null,
+    openrouterModel: (s[KEYS.openrouterModel] as string | undefined) ?? DEFAULT_OPENROUTER_MODEL,
     systemPrompt: (s[KEYS.systemPrompt] as string | undefined) ?? "",
     blockedSites: (s[KEYS.blockedSites] as string[] | undefined) ?? [...DEFAULT_BLOCKED_SITES],
     // Fall back if a stored model is no longer offered.
@@ -77,6 +91,22 @@ export async function loadSettings(): Promise<Settings> {
     autoRebuild: s[KEYS.autoRebuild] !== false,
     rebuildIntervalHours: (s[KEYS.rebuildIntervalHours] as number | undefined) ?? null,
   };
+}
+
+export type ConnectionSettings = Pick<Settings, "provider" | "apiKey" | "openrouterApiKey" | "openrouterModel">;
+
+export function activeApiKey(settings: ConnectionSettings): string | null {
+  return settings.provider === "openrouter" ? settings.openrouterApiKey : settings.apiKey;
+}
+
+export async function saveConnection(settings: ConnectionSettings): Promise<void> {
+  await browser.storage.local.set({
+    [KEYS.provider]: settings.provider,
+    ...(settings.provider === "anthropic" ? { [KEYS.apiKey]: settings.apiKey } : {
+      [KEYS.openrouterApiKey]: settings.openrouterApiKey,
+      [KEYS.openrouterModel]: settings.openrouterModel,
+    }),
+  });
 }
 
 export async function saveSetting<K extends "apiKey" | "systemPrompt" | "blockedSites" | "model" | "autoRebuild" | "rebuildIntervalHours">(

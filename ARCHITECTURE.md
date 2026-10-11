@@ -1,6 +1,57 @@
 # Architecture
 
-There is no server. Three parties are involved, and you run one of them.
+There is no application server. The service worker selects an explicit provider;
+existing profiles without a provider setting continue using Anthropic.
+
+## OpenRouter execution
+
+`packages/agent-core/openrouter.ts` runs a bounded chat-completions tool loop.
+`BuildManager` supplies the same browser bridge, storage, block-list getter,
+phase/text/log callbacks, and abort signal as the Anthropic implementation.
+No Copilot runtime or local companion is required. Edge uses the same Chromium
+MV3 build as Chrome.
+
+The worker calls OpenRouter's model catalog to validate availability and `tools`
+support. Each inference request includes the tool definitions and requests
+`provider.require_parameters: true` and `provider.data_collection: "deny"`.
+This restricts inference routing; it is not a guarantee of zero retention.
+No alternate provider is tried on failure.
+
+| Tool | Execution |
+|---|---|
+| `getHistory` | Filter/rank browser history locally, once per build |
+| `getPageHtml` | Enforce URL rules before loading and recheck final URLs/settings afterward; cache bounded HTML locally |
+| `searchPage` | Literal search over an allowed cached page; at most ten excerpts |
+| `readPage` | Read at most 16,000 characters from an allowed cached page |
+| `submitHomepage` | Validate the React-only imports, default functional component, and TSX syntax; return code to the host |
+
+Limits are enforced in code: eight requested URLs across the entire build
+(including failed/blocked requests), 30 model requests, 100,000 characters per
+cached page, a 240,000-character serialized request budget, and 100,000
+characters of output code. Requests time out after two minutes. Page truncation
+is reported to the model; API, budget, malformed response and tool errors are
+surfaced explicitly. Model turns are non-streaming; progress narration arrives
+per completed turn.
+
+The `openrouterBuild` local checkpoint pins the model/run ID and contains the
+conversation, page cache, consumed budgets, and attempted/completed tool calls.
+Each assistant message is saved before tool execution; each result is saved
+before the next inference. A tool interrupted while executing returns an explicit
+interruption result on resume rather than repeating browser activity. Interrupted
+inference can be retried and billed again. Completed code stays checkpointed until
+`saveHomepage` succeeds, after which the host clears the checkpoint. Cancellation
+and handled core errors clear it; hard worker/browser termination leaves it for
+resume. Handled failures do not trigger a paid retry every heartbeat.
+
+Changing connection settings affects the next fresh build, not a checkpoint's
+provider/model. Separate credentials prevent a provider switch from overwriting
+the other provider's key. The last saved homepage is left intact after a failed build.
+No generated code is executed during contract validation; the existing Sandpack
+iframe remains the render boundary.
+
+## Anthropic execution
+
+Three parties are involved, and you run one of them.
 
 | | Runs where | Does what |
 |---|---|---|
@@ -66,6 +117,7 @@ it runs sandboxed, not in the extension's own page.
 ```
 packages/agent-core/      host-agnostic agent loop — imports no chrome.*, browser.*, or node:*
   orchestrator.ts         runHomepageBuild: session lifecycle, event loop, tool dispatch, cleanup
+  openrouter.ts           bounded chat tool loop, page store, model catalog, local checkpoints
   setup.ts                ensureAgent / ensureEnvironment (created once, cached by ID)
   prompt.ts               system prompt + per-build kickoff message
   schemas.ts              custom tool input schemas and defaults
@@ -95,11 +147,12 @@ harness/                  Bun scripts: drive agent-core with a fixture/fetch bri
 | Command | Proves |
 |---|---|
 | `pnpm test` | The history digest is capped, ranked, drops `urls[]`, reports `totalSitesSeen` |
+| `pnpm test:openrouter` | Mocked tool loop, output parsing/rendering, URL filtering, budgets, checkpoints, cancellation, and API errors |
 | `pnpm agent:run` | Full build against the real API: tools, mounting, sandbox grep/read, deliverable, cleanup |
 | `pnpm agent:verify` | The deliverable transforms, evaluates and server-renders |
 | `pnpm agent:resume-test` | A build killed with a tool call pending can be reattached and finished |
 | `pnpm agent:retention <sessionId>` | The session and every uploaded page body are actually deleted |
-| `pnpm extension:test` | In headless Chrome: worker registers, new tab renders, port protocol answers, `chrome.history` reads |
+| `pnpm extension:test` | In isolated Edge/Chrome: actual new-tab override, worker/port/history APIs, provider settings, mocked full OpenRouter build, persistence/cleanup and viewport checks |
 
 The `agent:*` commands need `ANTHROPIC_API_KEY` in `.env` and spend API credits. The
 harness's bridge uses fixture history and a plain `fetch`, so it can't see
@@ -137,6 +190,17 @@ arrived in the history fetch.
 **`files.upload()` takes no `purpose`.** Just `{ file }`.
 
 ## Privacy
+
+OpenRouter receives history digests and requested page excerpts, then forwards
+inference context to the selected model provider. Its retention/logging settings
+and the downstream provider's policies must be reviewed independently; there is
+no managed-session deletion API in this path. Local checkpoint deletion does not
+delete remote provider data. Interrupted checkpoints contain private content in
+the browser profile until resumed or replaced. New block-list rules stop future
+page loads/reads, but cannot retract content already sent or included in earlier
+conversation turns. See [OpenRouter data collection](https://openrouter.ai/docs/guides/privacy/data-collection).
+
+The following upload/session lifecycle details apply to Anthropic:
 
 The editable blocked-sites list is enforced in agent-core's tool handlers, not
 just the prompt: blocked domains are excluded from history digests and their
